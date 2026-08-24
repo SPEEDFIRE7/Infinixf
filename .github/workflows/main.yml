@@ -1,0 +1,91 @@
+name: win 11 RDP bore
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-2025
+    timeout-minutes: 350
+
+    steps:
+      - name: Configure Core RDP Settings
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                             -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "SecurityLayer" -Value 0 -Force
+
+          netsh advfirewall firewall delete rule name="RDP-Bore" -ErrorAction SilentlyContinue
+         
+          netsh advfirewall firewall add rule name="RDP-Bore" `
+            dir=in action=allow protocol=TCP localport=3389
+
+          Restart-Service -Name TermService -Force
+
+      - name: Create RDP User with Fixed Password ME2008
+        run: |
+          $password = "MR.English2008"
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          if (-not (Get-LocalUser -Name "ME2008" -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name "ME2008" -Password $securePass -AccountNeverExpires
+          }
+          Add-LocalGroupMember -Group "Administrators" -Member "ME2008"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "ME2008"
+         
+          # Fixed the trailing space here so the password exports cleanly
+          echo "RDP_CREDS=$password" >> $env:GITHUB_ENV
+         
+          if (-not (Get-LocalUser -Name "ME2008")) {
+              Write-Error "User creation failed"
+              exit 1
+          }
+
+      - name: Establish Bore Tunnel and Maintain Connection
+        run: |
+          # Fetch the latest release for Windows x86_64
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/ekzhang/bore/releases/latest"
+          $asset = $release.assets | Where-Object { $_.name -match "x86_64-pc-windows-msvc\.zip$" }
+          
+          Write-Host "Downloading $($asset.name)..."
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "bore.zip"
+          Expand-Archive "bore.zip" -DestinationPath . -Force
+          
+          # Start bore in the background tunneling RDP port 3389
+          Start-Process -FilePath ".\bore.exe" -ArgumentList "local 3389 --to bore.pub" -NoNewWindow -RedirectStandardError "bore.log" -RedirectStandardOutput "bore_out.log"
+          
+          # Wait 5 seconds for the connection to establish
+          Start-Sleep -Seconds 5
+          
+          # Read log output to extract the assigned remote port
+          $logText = ""
+          if (Test-Path "bore.log") { $logText += Get-Content "bore.log" -Raw }
+          if (Test-Path "bore_out.log") { $logText += Get-Content "bore_out.log" -Raw }
+          
+          if ($logText -match "listening at bore\.pub:(\d+)") {
+              $remote_port = $matches[1]
+              Write-Host "Bore tunnel successfully established on bore.pub:$remote_port"
+          } else {
+              Write-Error "Failed to establish or parse bore tunnel port."
+              Write-Host "--- BORE LOG ---"
+              Write-Host $logText
+              exit 1
+          }
+
+          Write-Host "Thanks to MR.English2008 for this perfect work"
+          Write-Host "follow for more in my telegram channel"
+          Write-Host "https://t.me/ME2008_RDP"
+          
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: bore.pub:$remote_port"
+          Write-Host "Username: ME2008"
+          Write-Host "Password: $env:RDP_CREDS"
+          Write-Host "==================`n"
+          
+          # Maintain the connection loop inside the same step
+          while ($true) {
+              Write-Host "[$(Get-Date)] RDP Active on bore.pub:$remote_port - MR.English2008 "
+              Start-Sleep -Seconds 300
+          }
