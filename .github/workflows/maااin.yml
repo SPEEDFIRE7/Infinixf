@@ -1,0 +1,263 @@
+name: Build Infinix X6528 - Android 13
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: AOSP 13 X6528
+    runs-on: ubuntu-22.04
+
+    env:
+      ANDROID_VERSION: android-13.0.0_r1
+      DEVICE_REPO: https://dumps.tadiphone.dev/dumps/infinix/infinix-x6528.git
+      DEVICE_BRANCH: X6528-user-13-TP1A.220624.014-472-release-keys
+      DEVICE_PATH: device/infinix/X6528
+
+    steps:
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache
+          sudo docker system prune -af || true
+
+          echo "=== Disk space ==="
+          df -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            git-core \
+            gnupg \
+            flex \
+            bison \
+            build-essential \
+            zip \
+            curl \
+            zlib1g-dev \
+            gcc-multilib \
+            g++-multilib \
+            libc6-dev-i386 \
+            lib32ncurses5-dev \
+            x11proto-core-dev \
+            libx11-dev \
+            lib32z1-dev \
+            libgl1-mesa-dev \
+            libxml2-utils \
+            xsltproc \
+            unzip \
+            fontconfig \
+            python3 \
+            python3-pip \
+            rsync \
+            bc \
+            ccache \
+            lz4 \
+            libssl-dev \
+            libncurses5 \
+            libncurses5-dev \
+            libtinfo5
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+
+      - name: Install repo
+        run: |
+          mkdir -p "$HOME/bin"
+
+          curl -L \
+            https://storage.googleapis.com/git-repo-downloads/repo \
+            -o "$HOME/bin/repo"
+
+          chmod +x "$HOME/bin/repo"
+
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Initialize AOSP 13
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/android"
+          cd "$GITHUB_WORKSPACE/android"
+
+          repo init \
+            -u https://android.googlesource.com/platform/manifest \
+            -b "$ANDROID_VERSION" \
+            --depth=1
+
+      - name: Sync AOSP
+        run: |
+          cd "$GITHUB_WORKSPACE/android"
+
+          repo sync \
+            -c \
+            --force-sync \
+            --no-clone-bundle \
+            --no-tags \
+            --optimized-fetch \
+            -j2
+
+      - name: Clone X6528 device repository
+        run: |
+          cd "$GITHUB_WORKSPACE/android"
+
+          mkdir -p "$(dirname "$DEVICE_PATH")"
+
+          git clone \
+            --depth=1 \
+            --branch "$DEVICE_BRANCH" \
+            "$DEVICE_REPO" \
+            x6528-source
+
+      - name: Install X6528 device tree
+        run: |
+          cd "$GITHUB_WORKSPACE/android"
+
+          if [ ! -d "x6528-source/aosp-device-tree" ]; then
+            echo "ERROR: aosp-device-tree was not found."
+            find x6528-source -maxdepth 3 -type f | head -200
+            exit 1
+          fi
+
+          mkdir -p "$DEVICE_PATH"
+
+          cp -a \
+            x6528-source/aosp-device-tree/. \
+            "$DEVICE_PATH/"
+
+          echo "=== X6528 device tree ==="
+          find "$DEVICE_PATH" -maxdepth 3 -type f | sort | head -300
+
+      - name: Detect device configuration
+        run: |
+          cd "$GITHUB_WORKSPACE/android"
+
+          echo "=== AndroidProducts.mk ==="
+          find device vendor product -name AndroidProducts.mk \
+            -print 2>/dev/null || true
+
+          echo "=== BoardConfig ==="
+          find device vendor -iname 'BoardConfig*.mk' \
+            -print 2>/dev/null || true
+
+          echo "=== Product makefiles ==="
+          find device vendor product \
+            -type f \
+            \( -name '*device*.mk' -o -name '*product*.mk' \) \
+            -print 2>/dev/null | head -200
+
+      - name: Setup build environment
+        run: |
+          cd "$GITHUB_WORKSPACE/android"
+
+          source build/envsetup.sh
+
+          echo "=== Available lunch targets ==="
+          lunch 2>&1 | tee "$GITHUB_WORKSPACE/lunch.txt" || true
+
+      - name: Select X6528 lunch target
+        run: |
+          cd "$GITHUB_WORKSPACE/android"
+
+          source build/envsetup.sh
+
+          TARGET=""
+
+          # Try common X6528 targets first.
+          for t in \
+            "X6528-userdebug" \
+            "X6528-user" \
+            "aosp_X6528-userdebug" \
+            "aosp_X6528-user"
+          do
+            if lunch "$t" >/dev/null 2>&1; then
+              TARGET="$t"
+              break
+            fi
+          done
+
+          # If none of the common names work, inspect AndroidProducts.mk.
+          if [ -z "$TARGET" ]; then
+            echo "Common X6528 lunch targets were not found."
+
+            echo "Searching for product definitions..."
+
+            grep -R \
+              "COMMON_LUNCH_CHOICES" \
+              device/infinix/X6528 \
+              2>/dev/null || true
+
+            grep -R \
+              "PRODUCT_NAME" \
+              device/infinix/X6528 \
+              2>/dev/null || true
+
+            echo ""
+            echo "The device tree does not expose a standard X6528 lunch target."
+            echo "The build cannot continue until the product makefile is adapted."
+            exit 1
+          fi
+
+          echo "Selected target: $TARGET"
+          echo "LUNCH_TARGET=$TARGET" >> "$GITHUB_ENV"
+
+      - name: Build X6528
+        run: |
+          cd "$GITHUB_WORKSPACE/android"
+
+          source build/envsetup.sh
+
+          lunch "$LUNCH_TARGET"
+
+          echo "=== Build variables ==="
+          get_build_var TARGET_PRODUCT
+          get_build_var TARGET_DEVICE
+          get_build_var TARGET_ARCH
+          get_build_var PLATFORM_VERSION
+
+          echo "=== Starting build ==="
+
+          m \
+            -j2 \
+            systemimage \
+            vendorimage \
+            bootimage \
+            dtboimage
+
+      - name: Show output
+        if: always()
+        run: |
+          cd "$GITHUB_WORKSPACE/android"
+
+          echo "=== Build output ==="
+
+          if [ -d "out/target/product" ]; then
+            find out/target/product \
+              -maxdepth 3 \
+              -type f \
+              \( \
+                -name '*.img' \
+                -o -name '*.zip' \
+                -o -name 'vbmeta*' \
+              \) \
+              -print
+          else
+            echo "No build output directory."
+          fi
+
+      - name: Upload X6528 images
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: X6528-AOSP13
+          path: |
+            android/out/target/product/*/*.img
+            android/out/target/product/*/vbmeta*
+            android/out/target/product/*/*.zip
+          if-no-files-found: warn
+          retention-days: 7
