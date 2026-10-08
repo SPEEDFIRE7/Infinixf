@@ -1,0 +1,175 @@
+name: Merge kernel + DTB + files into boot.img
+
+on:
+  workflow_dispatch:
+    inputs:
+      boot_img_url:
+        description: "رابط boot.img الأصلي (PixelDrain أو رابط مباشر)"
+        required: true
+        default: "https://pixeldrain.com/u/LhQvAP8z"
+      run_id:
+        description: "رقم تشغيل البناء الذي أنتج kernel-output (الرقم بعد /runs/ في رابط الصفحة)"
+        required: true
+      dtb_url:
+        description: "اختياري: رابط ملف dtb (ملف خام أو أرشيف يحوي *.dtb). فارغ = استخدام dtb الناتج من البناء"
+        required: false
+        default: ""
+      ramdisk_files_url:
+        description: "اختياري: رابط أرشيف (zip/tar) بملفات تُدمج داخل ramdisk. بنية المجلدات = بنية الـ ramdisk"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  merge:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: تنزيل النواة المبنية
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-output
+          path: kernel-output
+          run-id: ${{ inputs.run_id }}
+          repository: ${{ github.repository }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: عرض محتوى النواة
+        run: ls -lh kernel-output
+
+      - name: دمج النواة و dtb والملفات داخل boot.img
+        env:
+          BOOT_URL: ${{ inputs.boot_img_url }}
+          DTB_URL: ${{ inputs.dtb_url }}
+          RD_URL: ${{ inputs.ramdisk_files_url }}
+        run: |
+          set -e
+          dl() {   # $1=رابط  $2=ملف الإخراج
+            local u="$1" o="$2"
+            if [[ "$u" =~ pixeldrain\.com/u/([A-Za-z0-9_-]+) ]]; then
+              u="https://pixeldrain.com/api/file/${BASH_REMATCH[1]}"
+            fi
+            echo "تنزيل: $u"
+            if [[ "$u" == file://* ]]; then cp "${u#file://}" "$o"; else curl -L --fail --retry 3 -o "$o" "$u"; fi
+          }
+          extract() {  # $1=أرشيف $2=مجلد
+            local f="$1" d="$2" ft; ft=$(file -b "$f"); mkdir -p "$d"
+            case "$ft" in
+              Zip*) unzip -q -o "$f" -d "$d" ;;
+              gzip*|bzip2*|XZ*|Zstandard*|POSIX\ tar*|tar\ archive*) tar -xf "$f" -C "$d" ;;
+              *) echo "::error::صيغة أرشيف غير مدعومة: $ft"; return 1 ;;
+            esac
+          }
+
+          KDIR="$(pwd)/kernel-output"
+          mkdir -p work && cd work
+          PLAN=../merge_plan.txt; : > "$PLAN"
+
+          # ---------- 1) boot.img + magiskboot ----------
+          dl "$BOOT_URL" boot.img
+          ls -l boot.img; file boot.img
+          if [ ! -x ./magiskboot ]; then
+            curl -L --fail --retry 3 -o magisk.apk https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
+            unzip -o -j magisk.apk lib/x86_64/libmagiskboot.so -d .
+            mv libmagiskboot.so magiskboot && chmod +x magiskboot
+          fi
+
+          # ---------- 2) ملف dtb (اختياري) ----------
+          HAVE_DTB=0
+          if [ -n "$DTB_URL" ]; then
+            dl "$DTB_URL" dtb_in.bin
+            FT=$(file -b dtb_in.bin); echo "نوع ملف dtb: $FT"
+            if [ "$(head -c4 dtb_in.bin | od -An -tx1 | tr -d ' \n')" = "d00dfeed" ]; then
+              cp dtb_in.bin new.dtb      # dtb خام (يبدأ بالرمز d00dfeed)
+            else
+              case "$FT" in
+                Zip*|gzip*|bzip2*|XZ*|Zstandard*|POSIX\ tar*|tar\ archive*)
+                  extract dtb_in.bin dtb_x
+                  LIST=$(find dtb_x -type f -name '*.dtb' | sort)
+                  [ -n "$LIST" ] || { echo "::error::لا يوجد *.dtb داخل الأرشيف"; exit 1; }
+                  echo "ملفات dtb وُجدت (تُدمج بهذا الترتيب):"; echo "$LIST"
+                  # shellcheck disable=SC2086
+                  cat $LIST > new.dtb ;;
+                *) echo "::error::ملف dtb غير معروف: $FT"; exit 1 ;;
+              esac
+            fi
+            MAGIC=$(head -c4 new.dtb | od -An -tx1 | tr -d ' \n')
+            [ "$MAGIC" = "d00dfeed" ] || { echo "::error::الملف ليس dtb صالحاً (magic=$MAGIC)"; exit 1; }
+            HAVE_DTB=1
+            echo "dtb جاهز: $(stat -c%s new.dtb) bytes" | tee -a "$PLAN"
+          fi
+
+          # ---------- 3) فك boot.img ----------
+          ./magiskboot unpack boot.img 2>&1 | tee unpack.log
+          echo "--- الملفات بعد الفك ---"; ls -l
+          FMT=$(sed -n 's/^KERNEL_FMT[[:space:]]*\[\([a-z0-9_]*\)\].*/\1/p' unpack.log | head -n1)
+          echo "صيغة نواة boot.img الأصلية: ${FMT:-غير معروفة}" | tee -a "$PLAN"
+          if [ "$FMT" = "raw" ]; then BASE=Image; else BASE=Image.gz; fi
+          [ -f "$KDIR/$BASE" ] || { echo "::error::$KDIR/$BASE غير موجود"; exit 1; }
+
+          # ---------- 4) دمج النواة و dtb ----------
+          if [ -s dtb ]; then
+            cp "$KDIR/$BASE" kernel
+            if [ "$HAVE_DTB" = 1 ]; then cp new.dtb dtb; echo "الوضع: استبدال قسم dtb في boot.img بملفك" | tee -a "$PLAN"
+            else echo "الوضع: النواة الجديدة + قسم dtb الأصلي كما هو" | tee -a "$PLAN"; fi
+          elif [ -s kernel_dtb ]; then
+            cp "$KDIR/Image" kernel
+            if [ "$HAVE_DTB" = 1 ]; then cp new.dtb kernel_dtb; echo "الوضع: استبدال kernel_dtb بملفك (Image خام)" | tee -a "$PLAN"
+            else echo "الوضع: Image خام + kernel_dtb الأصلي" | tee -a "$PLAN"; fi
+          else
+            if [ "$HAVE_DTB" = 1 ]; then
+              cat "$KDIR/$BASE" new.dtb > kernel
+              echo "الوضع: دمج $BASE + ملف dtb الذي زودتني به داخل kernel" | tee -a "$PLAN"
+            else
+              [ -f "$KDIR/Image.gz-dtb" ] || { echo "::error::Image.gz-dtb غير موجود"; exit 1; }
+              cp "$KDIR/Image.gz-dtb" kernel
+              echo "الوضع: استخدام Image.gz-dtb الناتج من البناء (بدون dtb خارجي)" | tee -a "$PLAN"
+            fi
+          fi
+          ls -l kernel
+
+          # ---------- 5) ملفات إضافية داخل ramdisk (اختياري) ----------
+          if [ -n "$RD_URL" ]; then
+            [ -f ramdisk.cpio ] || { echo "::error::لا يوجد ramdisk.cpio في هذا boot.img"; exit 1; }
+            dl "$RD_URL" rd_in.bin
+            extract rd_in.bin rd_x
+            # إن كان الأرشيف يحوي مجلداً واحداً غلافاً (ليس اسماً معروفاً في ramdisk) نتجاوزه
+            RDROOT=rd_x
+            TOPS=$(ls -A rd_x); NT=$(echo "$TOPS" | grep -c . || true)
+            if [ "$NT" = 1 ] && [ -d "rd_x/$TOPS" ]; then
+              case "$TOPS" in
+                system|sbin|bin|etc|vendor|odm|data|dev|proc|sys|apex|lib|lib64|res|mnt|metadata|debug_ramdisk|first_stage_ramdisk|overlay.d|persist|cache) ;;
+                *) RDROOT="rd_x/$TOPS"; echo "تم تجاوز المجلد الغلاف: $TOPS" | tee -a "$PLAN" ;;
+              esac
+            fi
+            CMDS=(); N=0
+            while IFS= read -r -d '' f; do
+              rel="${f#$RDROOT/}"
+              case "$rel" in *" "*) echo "تخطي (مسافة في الاسم): $rel"; continue ;; esac
+              if [ -x "$f" ] || [[ "$rel" == *.sh ]] || [[ "$rel" == */bin/* ]] || [[ "$rel" == */sbin/* ]] || [[ "$rel" == bin/* ]] || [[ "$rel" == sbin/* ]]; then mode=0755; else mode=0644; fi
+              CMDS+=("add $mode $rel $PWD/$f"); N=$((N+1))
+            done < <(find "$RDROOT" -type f -print0 | sort -z)
+            [ "$N" -gt 0 ] || { echo "::error::الأرشيف فارغ"; exit 1; }
+            ./magiskboot cpio ramdisk.cpio "${CMDS[@]}"
+            echo "أُضيف إلى ramdisk: $N ملف" | tee -a "$PLAN"
+            printf '%s\n' "${CMDS[@]}" | sed "s|$PWD/||" >> "$PLAN"
+          fi
+
+          # ---------- 6) إعادة التجميع + تحقق ----------
+          ./magiskboot repack boot.img new-boot.img 2>&1 | tee repack.log
+          ls -l boot.img new-boot.img | tee -a "$PLAN"
+          mkdir -p verify && ( cd verify && ../magiskboot unpack ../new-boot.img 2>&1 | tee ../verify.log )
+          mkdir -p ../bootout
+          cp new-boot.img unpack.log repack.log verify.log ../bootout/
+          cp "$PLAN" ../bootout/merge_plan.txt
+          echo "تم. new-boot.img جاهز."
+
+      - name: رفع النتيجة
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: new-boot-img
+          path: bootout/
+          if-no-files-found: ignore
