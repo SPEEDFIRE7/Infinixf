@@ -14,83 +14,187 @@ jobs:
 
     steps:
       - name: Download boot.img
+        shell: bash
         run: |
           set -e
 
           echo "Downloading boot.img..."
-          curl -L --fail --retry 3 \
+
+          curl -fL --retry 5 --retry-delay 2 \
             -o boot.img \
             "${{ inputs.boot_url }}"
 
           echo "Downloaded:"
           ls -lh boot.img
 
-      - name: Install tools
+          echo "File type:"
+          file boot.img
+
+      - name: Download MagiskBoot
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            android-sdk-libsparse-utils \
-            binutils \
-            file \
-            unzip \
-            xz-utils \
-            zstd \
-            lz4
+          set -e
 
-      - name: Install MagiskBoot
-        run: |
-          wget -q \
-            https://github.com/topjohnwu/Magisk/releases/latest/download/Magisk.zip \
-            -O Magisk.zip
+          echo "Downloading MagiskBoot..."
 
-          unzip -j Magisk.zip \
-            "lib/x86_64/libmagiskboot.so" \
-            -d magiskboot
+          mkdir -p tools
 
-          mv magiskboot/libmagiskboot.so magiskboot/magiskboot
-          chmod +x magiskboot/magiskboot
+          # Get latest Magisk release information
+          MAGISK_URL=$(curl -fsSL \
+            https://api.github.com/repos/topjohnwu/Magisk/releases/latest \
+            | grep -o 'https://[^"]*Magisk[^"]*\.zip' \
+            | head -1)
 
-      - name: Extract boot image
-        run: |
-          mkdir -p extracted
-
-          ./magiskboot/magiskboot unpack boot.img
-
-          echo "=== boot.img contents ==="
-          ls -lah
-
-          echo
-          echo "=== Extracted kernel ==="
-
-          if [ -f kernel ]; then
-            cp kernel extracted/kernel
-            ls -lh extracted/kernel
-          else
-            echo "ERROR: Kernel was not found!"
+          if [ -z "$MAGISK_URL" ]; then
+            echo "Could not find Magisk release."
             exit 1
           fi
 
-      - name: Analyze kernel
+          echo "Magisk URL:"
+          echo "$MAGISK_URL"
+
+          curl -fL --retry 5 \
+            -o Magisk.zip \
+            "$MAGISK_URL"
+
+          unzip -l Magisk.zip | head -50
+
+          # Extract MagiskBoot from the APK
+          unzip -j Magisk.zip \
+            'lib/x86_64/libmagiskboot.so' \
+            -d tools || true
+
+          if [ -f tools/libmagiskboot.so ]; then
+            mv tools/libmagiskboot.so tools/magiskboot
+          fi
+
+          chmod +x tools/magiskboot
+
+          echo "MagiskBoot:"
+          file tools/magiskboot
+
+      - name: Extract boot image
+        shell: bash
         run: |
+          set -e
+
+          mkdir -p extracted
+          cd extracted
+
+          ../tools/magiskboot unpack ../boot.img
+
+          echo
+          echo "=============================="
+          echo "BOOT IMAGE CONTENTS"
+          echo "=============================="
+
+          ls -lah
+
+          if [ ! -f kernel ]; then
+            echo "ERROR: Kernel was not found."
+            exit 1
+          fi
+
+          echo
+          echo "Kernel extracted successfully:"
+          ls -lh kernel
+
+      - name: Analyze kernel
+        shell: bash
+        run: |
+          set -e
+
+          KERNEL="extracted/kernel"
+
+          echo
           echo "========================================"
           echo "       ANDROID KERNEL ANALYZER"
           echo "========================================"
 
           echo
-          echo "[1] Kernel file:"
-          file extracted/kernel
+          echo "Kernel file:"
+          file "$KERNEL"
 
           echo
-          echo "[2] Kernel strings:"
-          strings extracted/kernel | \
-            grep -Ei \
-            "Linux version|gcc version|clang version|Android" \
-            | head -20 || true
+          echo "Linux version:"
+          strings "$KERNEL" \
+            | grep -m1 -E \
+            'Linux version [0-9]+\.[0-9]+\.[0-9]+' \
+            || echo "Not found"
 
           echo
-          echo "[3] Linux Kernel version:"
+          echo "Kernel version string:"
+          strings "$KERNEL" \
+            | grep -m1 'Linux version' \
+            || echo "Not found"
 
-          KERNEL_VERSION=$(strings extracted/kernel | \
-            grep -m1 -E \
-            "Linux version [0-9]+\.[0-9]+\.[0-9]+" \
-            | sed
+          echo
+          echo "Compiler:"
+          strings "$KERNEL" \
+            | grep -Ei \
+            'gcc version|clang version|LLVM version' \
+            | head -10 \
+            || echo "Not found"
+
+          echo
+          echo "Build information:"
+          strings "$KERNEL" \
+            | grep -Ei \
+            'Linux version|built|build|gcc|clang' \
+            | head -20 \
+            || true
+
+          echo
+          echo "Architecture:"
+          file "$KERNEL"
+
+          echo
+          echo "========================================"
+
+      - name: Generate report
+        shell: bash
+        run: |
+          KERNEL="extracted/kernel"
+
+          {
+            echo "# Android Kernel Analysis"
+            echo
+            echo "## Kernel"
+            file "$KERNEL"
+
+            echo
+            echo "## Linux version"
+            strings "$KERNEL" \
+              | grep -m1 'Linux version' \
+              || echo "Not found"
+
+            echo
+            echo "## Compiler"
+            strings "$KERNEL" \
+              | grep -Ei \
+              'gcc version|clang version|LLVM version' \
+              | head -10 \
+              || echo "Not found"
+
+            echo
+            echo "## Build information"
+            strings "$KERNEL" \
+              | grep -Ei \
+              'Linux version|built|build' \
+              | head -20 \
+              || true
+          } > kernel-report.txt
+
+          cat kernel-report.txt
+
+      - name: Upload extracted kernel
+        uses: actions/upload-artifact@v4
+        with:
+          name: extracted-kernel
+          path: extracted/kernel
+
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-analysis-report
+          path: kernel-report.txt
