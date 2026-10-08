@@ -1,0 +1,215 @@
+name: Merge kernel + DTB + files into boot.img
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_src:
+        description: "النواة المبنية: ملف أو مجلد داخل المستودع (inputs/kernel-output.zip)، أو release:TAG، أو run:رقم، أو رابط zip"
+        required: true
+        default: "inputs/kernel-output.zip"
+      boot_src:
+        description: "boot.img الأصلي: ملف داخل المستودع (inputs/boot.img)، أو release:TAG، أو رابط (PixelDrain). يقبل zip يحويه"
+        required: true
+        default: "https://pixeldrain.com/u/LhQvAP8z"
+      dtb_src:
+        description: "اختياري: dtb (ملف أو zip أو مجلد داخل المستودع، أو release:TAG، أو رابط). فارغ = استخدام dtb الناتج من البناء"
+        required: false
+        default: ""
+      ramdisk_src:
+        description: "اختياري: ملفات تُدمج داخل ramdisk (مجلد أو zip/tar بنفس بنية الـ ramdisk)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  merge:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: جلب مجلد inputs من المستودع
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: inputs
+          sparse-checkout-cone-mode: true
+
+      - name: محتوى مجلد inputs
+        run: ls -lhR inputs 2>/dev/null | head -n 40 || echo "(مجلد inputs غير موجود)"
+
+      - name: دمج النواة و dtb والملفات داخل boot.img
+        env:
+          KERNEL_SRC: ${{ inputs.kernel_src }}
+          BOOT_SRC: ${{ inputs.boot_src }}
+          DTB_SRC: ${{ inputs.dtb_src }}
+          RD_SRC: ${{ inputs.ramdisk_src }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          WS="${GITHUB_WORKSPACE:-$PWD}"
+          mkdir -p work && cd work
+          PLAN=../merge_plan.txt; : > "$PLAN"
+
+          dl() {   # $1=رابط  $2=ملف الإخراج
+            local u="$1" o="$2"
+            if [[ "$u" =~ pixeldrain\.com/u/([A-Za-z0-9_-]+) ]]; then
+              u="https://pixeldrain.com/api/file/${BASH_REMATCH[1]}"
+            fi
+            echo "تنزيل: $u"
+            if [[ "$u" == file://* ]]; then cp "${u#file://}" "$o"; else curl -L --fail --retry 3 -o "$o" "$u"; fi
+          }
+          try_extract() {  # $1=ملف $2=مجلد ؛ ينجح فقط إن كان الملف أرشيفاً
+            local f="$1" d="$2" ft; ft=$(file -b "$f")
+            case "$ft" in
+              Zip*) mkdir -p "$d"; unzip -q -o "$f" -d "$d"; return 0 ;;
+              gzip*|bzip2*|XZ*|Zstandard*|POSIX\ tar*|tar\ archive*)
+                if tar -tf "$f" >/dev/null 2>&1; then mkdir -p "$d"; tar -xf "$f" -C "$d"; return 0; fi ;;
+            esac
+            return 1
+          }
+          expand_archives() {  # يفك كل الأرشيفات داخل مجلد (جولتان لأرشيف داخل أرشيف)
+            local dir="$1" f i
+            for i in 1 2; do
+              local files=()
+              mapfile -d '' -t files < <(find "$dir" -type f -print0)
+              for f in "${files[@]}"; do
+                if try_extract "$f" "$(dirname "$f")/_x_$(basename "$f")"; then rm -f "$f"; fi
+              done
+            done
+          }
+          fetch() {  # $1=المصدر  $2=مجلد الوجهة
+            local spec="$1" out="$2"; mkdir -p "$out"
+            echo ">> المصدر: $spec"
+            case "$spec" in
+              run:*)     gh run download "${spec#run:}" -R "$GITHUB_REPOSITORY" -n kernel-output -D "$out" ;;
+              release:*) gh release download "${spec#release:}" -R "$GITHUB_REPOSITORY" -D "$out" --clobber ;;
+              http://*|https://*|file://*) dl "$spec" "$out/download.bin" ;;
+              *) [ -e "$WS/$spec" ] || { echo "::error::المسار غير موجود في المستودع: $spec (ارفع الملف إلى مجلد inputs في المستودع)"; ls -R "$WS/inputs" 2>/dev/null | head -n 30; exit 1; }
+                 cp -a "$WS/$spec" "$out/" ;;
+            esac
+            find "$out" -type f -printf '   %s bytes  %p\n' | head -n 20
+          }
+          need() { [ -n "$1" ] || { echo "::error::$2"; exit 1; }; }
+          magic() { head -c4 "$1" | od -An -tx1 | tr -d ' \n'; }
+
+          # ---------- 1) النواة المبنية ----------
+          fetch "$KERNEL_SRC" kin
+          expand_archives kin
+          KG=$(find kin -type f -name 'Image.gz-dtb' | head -n1 || true)
+          KZ=$(find kin -type f -name 'Image.gz' | head -n1 || true)
+          KI=$(find kin -type f -name 'Image' | head -n1 || true)
+          echo "النواة: Image.gz-dtb=${KG:-لا يوجد} | Image.gz=${KZ:-لا يوجد} | Image=${KI:-لا يوجد}" | tee -a "$PLAN"
+          need "$KG$KZ$KI" "لم أجد Image أو Image.gz أو Image.gz-dtb في مصدر النواة"
+
+          # ---------- 2) boot.img ----------
+          fetch "$BOOT_SRC" bin
+          expand_archives bin
+          BOOTF=$(find bin -type f -name 'boot*.img' | head -n1 || true)
+          [ -n "$BOOTF" ] || BOOTF=$(find bin -type f | head -n1 || true)
+          need "$BOOTF" "لم أجد boot.img في المصدر"
+          cp "$BOOTF" boot.img
+          ls -l boot.img; file boot.img
+
+          if [ ! -x ./magiskboot ]; then
+            curl -L --fail --retry 3 -o magisk.apk https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
+            unzip -o -j magisk.apk lib/x86_64/libmagiskboot.so -d .
+            mv libmagiskboot.so magiskboot && chmod +x magiskboot
+          fi
+
+          # ---------- 3) ملف dtb (اختياري) ----------
+          HAVE_DTB=0
+          if [ -n "$DTB_SRC" ]; then
+            fetch "$DTB_SRC" dtbin
+            expand_archives dtbin
+            LIST=$(find dtbin -type f -name '*.dtb' | sort || true)
+            if [ -z "$LIST" ]; then
+              while IFS= read -r f; do
+                [ "$(magic "$f")" = "d00dfeed" ] && LIST="${LIST}${f}"$'\n'
+              done < <(find dtbin -type f | sort)
+              LIST=$(printf '%s' "$LIST" | sed '/^$/d')
+            fi
+            need "$LIST" "لم أجد ملف dtb صالحاً (يبدأ بالرمز d00dfeed) في المصدر"
+            echo "ملفات dtb (تُدمج بهذا الترتيب):"; echo "$LIST"
+            : > new.dtb
+            while IFS= read -r f; do cat "$f" >> new.dtb; done <<< "$LIST"
+            [ "$(magic new.dtb)" = "d00dfeed" ] || { echo "::error::الناتج ليس dtb صالحاً"; exit 1; }
+            HAVE_DTB=1
+            echo "dtb جاهز: $(stat -c%s new.dtb) bytes" | tee -a "$PLAN"
+          fi
+
+          # ---------- 4) فك boot.img ----------
+          ./magiskboot unpack boot.img 2>&1 | tee unpack.log
+          echo "--- الملفات بعد الفك ---"; ls -l
+          FMT=$(sed -n 's/^KERNEL_FMT[[:space:]]*\[\([a-z0-9_]*\)\].*/\1/p' unpack.log | head -n1)
+          echo "صيغة نواة boot.img الأصلية: ${FMT:-غير معروفة}" | tee -a "$PLAN"
+          if [ "$FMT" = "raw" ]; then BASEF="$KI"; BASENAME=Image; else BASEF="$KZ"; BASENAME=Image.gz; fi
+
+          # ---------- 5) دمج النواة و dtb ----------
+          if [ -s dtb ]; then
+            if [ -z "$BASEF" ] && [ -n "$KG" ]; then BASEF="$KG"; echo "تنبيه: $BASENAME غير متوفر، سيُستخدم Image.gz-dtb" | tee -a "$PLAN"; fi
+            need "$BASEF" "يلزم $BASENAME لهذا boot.img (قسم dtb منفصل)"
+            cp "$BASEF" kernel
+            if [ "$HAVE_DTB" = 1 ]; then cp new.dtb dtb; echo "الوضع: استبدال قسم dtb في boot.img بملفك" | tee -a "$PLAN"
+            else echo "الوضع: النواة الجديدة + قسم dtb الأصلي كما هو" | tee -a "$PLAN"; fi
+          elif [ -s kernel_dtb ]; then
+            need "$KI" "يلزم Image (خام) لهذا boot.img (يحوي kernel_dtb)"
+            cp "$KI" kernel
+            if [ "$HAVE_DTB" = 1 ]; then cp new.dtb kernel_dtb; echo "الوضع: استبدال kernel_dtb بملفك (Image خام)" | tee -a "$PLAN"
+            else echo "الوضع: Image خام + kernel_dtb الأصلي" | tee -a "$PLAN"; fi
+          else
+            if [ "$HAVE_DTB" = 1 ]; then
+              need "$BASEF" "لدمج dtb جديد يلزم $BASENAME غير المدموج مع dtb (وُجد فقط: ${KG:-لا شيء})"
+              cat "$BASEF" new.dtb > kernel
+              echo "الوضع: دمج $BASENAME + ملف dtb الذي زودتني به داخل kernel" | tee -a "$PLAN"
+            else
+              need "$KG" "لا يوجد Image.gz-dtb في مصدر النواة (أضفه أو زوّدني بـ dtb_src)"
+              cp "$KG" kernel
+              echo "الوضع: استخدام Image.gz-dtb الجاهز (بدون dtb خارجي)" | tee -a "$PLAN"
+            fi
+          fi
+          ls -l kernel
+
+          # ---------- 6) ملفات إضافية داخل ramdisk (اختياري) ----------
+          if [ -n "$RD_SRC" ]; then
+            [ -f ramdisk.cpio ] || { echo "::error::لا يوجد ramdisk.cpio في هذا boot.img"; exit 1; }
+            fetch "$RD_SRC" rdin
+            mkdir -p rd_x
+            NF=$(find rdin -type f | wc -l)
+            if [ "$NF" = 1 ] && try_extract "$(find rdin -type f)" rd_x; then :; else cp -a rdin/. rd_x/; fi
+            RDROOT=rd_x
+            TOPS=$(ls -A rd_x); NT=$(echo "$TOPS" | grep -c . || true)
+            if [ "$NT" = 1 ] && [ -d "rd_x/$TOPS" ]; then
+              case "$TOPS" in
+                system|sbin|bin|etc|vendor|odm|data|dev|proc|sys|apex|lib|lib64|res|mnt|metadata|debug_ramdisk|first_stage_ramdisk|overlay.d|persist|cache) ;;
+                *) RDROOT="rd_x/$TOPS"; echo "تم تجاوز المجلد الغلاف: $TOPS" | tee -a "$PLAN" ;;
+              esac
+            fi
+            CMDS=(); N=0
+            while IFS= read -r -d '' f; do
+              rel="${f#$RDROOT/}"
+              case "$rel" in *" "*) echo "تخطي (مسافة في الاسم): $rel"; continue ;; esac
+              if [ -x "$f" ] || [[ "$rel" == *.sh ]] || [[ "$rel" == */bin/* ]] || [[ "$rel" == */sbin/* ]] || [[ "$rel" == bin/* ]] || [[ "$rel" == sbin/* ]]; then mode=0755; else mode=0644; fi
+              CMDS+=("add $mode $rel $PWD/$f"); N=$((N+1))
+            done < <(find "$RDROOT" -type f -print0 | sort -z)
+            [ "$N" -gt 0 ] || { echo "::error::لا ملفات لإضافتها"; exit 1; }
+            ./magiskboot cpio ramdisk.cpio "${CMDS[@]}"
+            echo "أُضيف إلى ramdisk: $N ملف" | tee -a "$PLAN"
+            printf '%s\n' "${CMDS[@]}" | sed "s|$PWD/||" >> "$PLAN"
+          fi
+
+          # ---------- 7) إعادة التجميع + تحقق ----------
+          ./magiskboot repack boot.img new-boot.img 2>&1 | tee repack.log
+          ls -l boot.img new-boot.img | tee -a "$PLAN"
+          mkdir -p verify && ( cd verify && ../magiskboot unpack ../new-boot.img 2>&1 | tee ../verify.log )
+          mkdir -p ../bootout
+          cp new-boot.img unpack.log repack.log verify.log ../bootout/
+          cp "$PLAN" ../bootout/merge_plan.txt
+          echo "تم. new-boot.img جاهز."
+
+      - name: رفع النتيجة
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: new-boot-img
+          path: bootout/
+          if-no-files-found: ignore
