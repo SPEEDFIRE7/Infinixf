@@ -1,0 +1,241 @@
+name: Android Kernel Analyzer
+
+on:
+  workflow_dispatch:
+    inputs:
+      boot_url:
+        description: "Direct URL to boot.img"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze Android Kernel
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Download boot.img
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          URL="${{ inputs.boot_url }}"
+
+          echo "========================================"
+          echo "Downloading boot.img"
+          echo "========================================"
+
+          if [[ ! "$URL" =~ ^https?:// ]]; then
+            echo "ERROR: Invalid URL"
+            exit 1
+          fi
+
+          curl -fL \
+            --retry 5 \
+            --retry-delay 2 \
+            --connect-timeout 30 \
+            --max-time 900 \
+            -A "Android-Kernel-Analyzer" \
+            "$URL" \
+            -o boot.img
+
+          echo
+          echo "Download completed:"
+          ls -lh boot.img
+
+          echo
+          echo "File type:"
+          file boot.img
+
+          echo
+          echo "SHA256:"
+          sha256sum boot.img
+
+
+      - name: Check required tools
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Checking tools..."
+
+          for tool in curl unzip jq file strings sha256sum; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              echo "ERROR: Missing tool: $tool"
+              exit 1
+            fi
+
+            echo "OK: $tool"
+          done
+
+
+      - name: Download Magisk
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "========================================"
+          echo "Downloading official Magisk"
+          echo "========================================"
+
+          mkdir -p tools
+
+          curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -A "Android-Kernel-Analyzer" \
+            https://api.github.com/repos/topjohnwu/Magisk/releases/latest \
+            -o magisk.json
+
+          MAGISK_URL=$(jq -r '
+            .assets[]
+            | select(.name | endswith(".apk"))
+            | .browser_download_url
+          ' magisk.json | head -n 1)
+
+          if [[ -z "$MAGISK_URL" || "$MAGISK_URL" == "null" ]]; then
+            echo "ERROR: Could not find Magisk APK."
+            jq -r '.assets[].name' magisk.json
+            exit 1
+          fi
+
+          echo "Magisk URL:"
+          echo "$MAGISK_URL"
+
+          curl -fL \
+            --retry 5 \
+            --retry-delay 2 \
+            --max-time 600 \
+            "$MAGISK_URL" \
+            -o Magisk.apk
+
+          echo
+          echo "Magisk downloaded:"
+          ls -lh Magisk.apk
+
+          unzip -t Magisk.apk >/dev/null
+
+          echo "APK verification: OK"
+
+
+      - name: Extract MagiskBoot
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "========================================"
+          echo "Extracting MagiskBoot"
+          echo "========================================"
+
+          mkdir -p tools
+
+          echo "Searching for x86_64 MagiskBoot..."
+
+          unzip -l Magisk.apk | grep "lib/x86_64" || true
+
+          unzip -j -o Magisk.apk \
+            "lib/x86_64/libmagiskboot.so" \
+            -d tools
+
+          if [[ ! -f tools/libmagiskboot.so ]]; then
+            echo "ERROR: libmagiskboot.so not found."
+            echo
+            echo "Available libraries:"
+            unzip -l Magisk.apk | grep "lib/" || true
+            exit 1
+          fi
+
+          mv tools/libmagiskboot.so tools/magiskboot
+
+          chmod +x tools/magiskboot
+
+          echo
+          echo "MagiskBoot ready:"
+          file tools/magiskboot
+
+
+      - name: Extract boot image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "========================================"
+          echo "Extracting boot.img"
+          echo "========================================"
+
+          rm -rf extracted
+          mkdir -p extracted
+
+          cp boot.img extracted/original-boot.img
+
+          cd extracted
+
+          ../tools/magiskboot unpack original-boot.img
+
+          echo
+          echo "Extracted files:"
+          ls -lah
+
+          if [[ ! -f kernel ]]; then
+            echo
+            echo "ERROR: Kernel was not extracted."
+            exit 1
+          fi
+
+          echo
+          echo "SUCCESS!"
+          echo "Kernel:"
+          ls -lh kernel
+
+          echo
+          echo "Kernel type:"
+          file kernel
+
+
+      - name: Analyze kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          KERNEL="extracted/kernel"
+
+          echo
+          echo "========================================"
+          echo "       ANDROID KERNEL ANALYZER"
+          echo "========================================"
+
+          echo
+          echo "Kernel file:"
+          file "$KERNEL"
+
+          echo
+          echo "Kernel SHA256:"
+          sha256sum "$KERNEL"
+
+          echo
+          echo "----------------------------------------"
+          echo "LINUX VERSION"
+          echo "----------------------------------------"
+
+          LINUX_VERSION=$(strings -a "$KERNEL" \
+            | grep -m1 -E \
+            'Linux version [0-9]+\.[0-9]+\.[0-9]+' \
+            || true)
+
+          if [[ -n "$LINUX_VERSION" ]]; then
+            echo "$LINUX_VERSION"
+          else
+            echo "Not found"
+          fi
+
+          echo
+          echo "----------------------------------------"
+          echo "KERNEL VERSION"
+          echo "----------------------------------------"
+
+          VERSION=$(printf '%s\n' "$LINUX_VERSION" \
+            | sed -nE \
+            's/.*
