@@ -1,0 +1,118 @@
+name: Android Boot.img Kernel Analyzer
+
+on:
+  workflow_dispatch:
+    inputs:
+      boot_url:
+        description: "Direct download URL of boot.img"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze Android Kernel
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ============================================================
+      # 1. Download boot.img
+      # ============================================================
+      - name: Download boot.img
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "========================================"
+          echo "Downloading boot.img"
+          echo "========================================"
+
+          URL="${{ inputs.boot_url }}"
+
+          if [[ ! "$URL" =~ ^https?:// ]]; then
+            echo "ERROR: The URL must start with http:// or https://"
+            exit 1
+          fi
+
+          curl -fL \
+            --retry 5 \
+            --retry-delay 2 \
+            --connect-timeout 20 \
+            --max-time 600 \
+            -A "Android-Kernel-Analyzer/1.0" \
+            "$URL" \
+            -o boot.img
+
+          echo
+          echo "Downloaded successfully."
+
+          ls -lh boot.img
+
+          echo
+          echo "File information:"
+          file boot.img
+
+          echo
+          echo "SHA256:"
+          sha256sum boot.img
+
+
+      # ============================================================
+      # 2. Install required tools
+      # ============================================================
+      - name: Install tools
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Installing required tools..."
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            curl \
+            jq \
+            unzip \
+            file \
+            binutils \
+            xxd \
+            strings
+
+          echo
+          echo "Tools installed."
+
+
+      # ============================================================
+      # 3. Download official Magisk and extract MagiskBoot
+      # ============================================================
+      - name: Install MagiskBoot
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "========================================"
+          echo "Installing MagiskBoot"
+          echo "========================================"
+
+          mkdir -p tools
+
+          echo "Querying official Magisk GitHub API..."
+
+          API="https://api.github.com/repos/topjohnwu/Magisk/releases"
+
+          MAGISK_JSON=$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -A "Android-Kernel-Analyzer/1.0" \
+            "$API")
+
+          echo "$MAGISK_JSON" > magisk-releases.json
+
+          # Find the newest published Magisk APK.
+          MAGISK_APK_URL=$(echo "$MAGISK_JSON" | jq -r '
+            [
+              .[]
+              | select(.draft == false)
+              | .
