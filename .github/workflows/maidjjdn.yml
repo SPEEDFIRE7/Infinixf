@@ -1,0 +1,810 @@
+name: Build DSU Lock APK v3 (languages + Shizuku)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+
+      - name: Accept Android SDK licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+
+      - name: Generate project
+        run: |
+          mkdir -p app/src/main/java/com/dsulock
+          mkdir -p app/src/main/res/layout app/src/main/res/xml
+          mkdir -p app/src/main/res/drawable app/src/main/res/mipmap-anydpi-v26
+          for d in values values-ar values-fr values-tr values-fa values-es; do
+            mkdir -p app/src/main/res/$d
+          done
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "DsuLock"
+          include ':app'
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins { id 'com.android.application' version '8.5.2' apply false }
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins { id 'com.android.application' }
+          android {
+              namespace 'com.dsulock'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'com.dsulock'
+                  minSdk 29
+                  targetSdk 29
+                  versionCode 3
+                  versionName '3.0'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          dependencies {
+              implementation 'com.google.android.material:material:1.12.0'
+              implementation 'dev.rikka.shizuku:api:13.1.5'
+              implementation 'dev.rikka.shizuku:provider:13.1.5'
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:label="DSU Lock"
+                  android:icon="@mipmap/ic_launcher"
+                  android:roundIcon="@mipmap/ic_launcher"
+                  android:supportsRtl="true"
+                  android:localeConfig="@xml/locales_config"
+                  android:theme="@style/Theme.DsuLock">
+
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+
+                  <activity android:name=".SettingsActivity" android:exported="false"/>
+
+                  <provider
+                      android:name="rikka.shizuku.ShizukuProvider"
+                      android:authorities="${applicationId}.shizuku"
+                      android:multiprocess="false"
+                      android:enabled="true"
+                      android:exported="true"
+                      android:permission="android.permission.INTERACT_ACROSS_USERS_FULL"/>
+
+                  <service
+                      android:name="androidx.appcompat.app.AppLocalesMetadataHolderService"
+                      android:enabled="false"
+                      android:exported="false">
+                      <meta-data
+                          android:name="autoStoreLocales"
+                          android:value="true"/>
+                  </service>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/res/xml/locales_config.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <locale-config xmlns:android="http://schemas.android.com/apk/res/android">
+              <locale android:name="en"/>
+              <locale android:name="ar"/>
+              <locale android:name="fr"/>
+              <locale android:name="tr"/>
+              <locale android:name="fa"/>
+              <locale android:name="es"/>
+          </locale-config>
+          EOF
+
+          cat > app/src/main/res/values/themes.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.DsuLock" parent="Theme.Material3.DynamicColors.DayNight"/>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/values/colors.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="ic_launcher_background">#1B1B1F</color>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/drawable/ic_launcher_foreground.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+              <path
+                  android:strokeColor="#A8C7FA"
+                  android:strokeWidth="5"
+                  android:strokeLineCap="round"
+                  android:pathData="M42,54 L42,46 A12,12 0 0 1 66,46 L66,54"/>
+              <path
+                  android:fillColor="#A8C7FA"
+                  android:pathData="M36,54 h36 a4,4 0 0 1 4,4 v22 a4,4 0 0 1 -4,4 h-36 a4,4 0 0 1 -4,-4 v-22 a4,4 0 0 1 4,-4 z"/>
+              <path
+                  android:fillColor="#1B1B1F"
+                  android:pathData="M54,66 m-3.5,0 a3.5,3.5 0 1,0 7,0 a3.5,3.5 0 1,0 -7,0"/>
+          </vector>
+          EOF
+
+          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/ic_launcher_background"/>
+              <foreground android:drawable="@drawable/ic_launcher_foreground"/>
+              <monochrome android:drawable="@drawable/ic_launcher_foreground"/>
+          </adaptive-icon>
+          EOF
+
+          # ---------------- Strings ----------------
+          cat > app/src/main/res/values/strings.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="subtitle">Control Dynamic System (DSU) boot</string>
+              <string name="stay_title">Stay in DSU forever</string>
+              <string name="stay_desc">When turned off, the device returns to the original ROM on the next boot</string>
+              <string name="btn_status">Refresh status</string>
+              <string name="btn_reboot">Reboot</string>
+              <string name="btn_settings">Settings</string>
+              <string name="state_on">Enabled: the device will boot into DSU</string>
+              <string name="state_off">Disabled: the device will return to the original ROM</string>
+              <string name="settings_title">Settings</string>
+              <string name="language">Language</string>
+              <string name="lang_system">System default</string>
+              <string name="method">Run commands with</string>
+              <string name="method_root" translatable="false">Root</string>
+              <string name="method_shizuku" translatable="false">Shizuku</string>
+              <string name="shizuku_ok">Shizuku is ready</string>
+              <string name="shizuku_nopermission">Shizuku is running but permission is not granted</string>
+              <string name="shizuku_notrunning">Shizuku is not running or not installed</string>
+              <string name="shizuku_grant">Grant Shizuku permission</string>
+              <string name="shizuku_denied_hint">Permission was denied. Grant it from the Shizuku app (authorized apps).</string>
+              <string name="err_shizuku">Shizuku is not ready. Open Settings to check it.</string>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/values-ar/strings.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="subtitle">التحكم في إقلاع النظام الديناميكي DSU</string>
+              <string name="stay_title">البقاء في DSU دائماً</string>
+              <string name="stay_desc">عند الإيقاف يعود الجهاز إلى الروم الأصلي في الإقلاع التالي</string>
+              <string name="btn_status">تحديث الحالة</string>
+              <string name="btn_reboot">إعادة التشغيل</string>
+              <string name="btn_settings">الإعدادات</string>
+              <string name="state_on">مفعّل: سيقلع الجهاز في DSU</string>
+              <string name="state_off">غير مفعّل: سيعود الجهاز إلى الروم الأصلي</string>
+              <string name="settings_title">الإعدادات</string>
+              <string name="language">اللغة</string>
+              <string name="lang_system">لغة النظام</string>
+              <string name="method">تنفيذ الأوامر بواسطة</string>
+              <string name="shizuku_ok">Shizuku جاهز</string>
+              <string name="shizuku_nopermission">Shizuku يعمل لكن الصلاحية غير ممنوحة</string>
+              <string name="shizuku_notrunning">Shizuku لا يعمل أو غير مثبّت</string>
+              <string name="shizuku_grant">منح صلاحية Shizuku</string>
+              <string name="shizuku_denied_hint">تم رفض الصلاحية. امنحها من تطبيق Shizuku (التطبيقات المصرّح لها).</string>
+              <string name="err_shizuku">Shizuku غير جاهز. افتح الإعدادات للتحقق منه.</string>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/values-fr/strings.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="subtitle">Contrôler le démarrage du système dynamique (DSU)</string>
+              <string name="stay_title">Rester dans DSU en permanence</string>
+              <string name="stay_desc">Désactivé, l’appareil revient à la ROM d’origine au prochain démarrage</string>
+              <string name="btn_status">Actualiser l’état</string>
+              <string name="btn_reboot">Redémarrer</string>
+              <string name="btn_settings">Paramètres</string>
+              <string name="state_on">Activé : l’appareil démarrera dans DSU</string>
+              <string name="state_off">Désactivé : l’appareil reviendra à la ROM d’origine</string>
+              <string name="settings_title">Paramètres</string>
+              <string name="language">Langue</string>
+              <string name="lang_system">Langue du système</string>
+              <string name="method">Exécuter les commandes avec</string>
+              <string name="shizuku_ok">Shizuku est prêt</string>
+              <string name="shizuku_nopermission">Shizuku fonctionne mais l’autorisation n’est pas accordée</string>
+              <string name="shizuku_notrunning">Shizuku n’est pas lancé ou pas installé</string>
+              <string name="shizuku_grant">Accorder l’autorisation Shizuku</string>
+              <string name="shizuku_denied_hint">Autorisation refusée. Accordez-la depuis l’application Shizuku (applications autorisées).</string>
+              <string name="err_shizuku">Shizuku n’est pas prêt. Ouvrez les paramètres pour vérifier.</string>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/values-tr/strings.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="subtitle">Dinamik Sistem (DSU) açılışını kontrol et</string>
+              <string name="stay_title">Her zaman DSU’da kal</string>
+              <string name="stay_desc">Kapatıldığında cihaz bir sonraki açılışta orijinal ROM’a döner</string>
+              <string name="btn_status">Durumu yenile</string>
+              <string name="btn_reboot">Yeniden başlat</string>
+              <string name="btn_settings">Ayarlar</string>
+              <string name="state_on">Etkin: cihaz DSU’da açılacak</string>
+              <string name="state_off">Devre dışı: cihaz orijinal ROM’a dönecek</string>
+              <string name="settings_title">Ayarlar</string>
+              <string name="language">Dil</string>
+              <string name="lang_system">Sistem varsayılanı</string>
+              <string name="method">Komutları şununla çalıştır</string>
+              <string name="shizuku_ok">Shizuku hazır</string>
+              <string name="shizuku_nopermission">Shizuku çalışıyor ancak izin verilmedi</string>
+              <string name="shizuku_notrunning">Shizuku çalışmıyor veya yüklü değil</string>
+              <string name="shizuku_grant">Shizuku iznini ver</string>
+              <string name="shizuku_denied_hint">İzin reddedildi. Shizuku uygulamasından verin (yetkili uygulamalar).</string>
+              <string name="err_shizuku">Shizuku hazır değil. Kontrol etmek için ayarları açın.</string>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/values-fa/strings.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="subtitle">کنترل راه‌اندازی سیستم پویا (DSU)</string>
+              <string name="stay_title">ماندن دائمی در DSU</string>
+              <string name="stay_desc">در حالت خاموش، دستگاه در راه‌اندازی بعدی به رام اصلی برمی‌گردد</string>
+              <string name="btn_status">به‌روزرسانی وضعیت</string>
+              <string name="btn_reboot">راه‌اندازی مجدد</string>
+              <string name="btn_settings">تنظیمات</string>
+              <string name="state_on">فعال: دستگاه در DSU بالا می‌آید</string>
+              <string name="state_off">غیرفعال: دستگاه به رام اصلی برمی‌گردد</string>
+              <string name="settings_title">تنظیمات</string>
+              <string name="language">زبان</string>
+              <string name="lang_system">پیش‌فرض سیستم</string>
+              <string name="method">اجرای دستورات با</string>
+              <string name="shizuku_ok">Shizuku آماده است</string>
+              <string name="shizuku_nopermission">Shizuku در حال اجراست اما مجوز داده نشده</string>
+              <string name="shizuku_notrunning">Shizuku اجرا نمی‌شود یا نصب نیست</string>
+              <string name="shizuku_grant">دادن مجوز Shizuku</string>
+              <string name="shizuku_denied_hint">مجوز رد شد. آن را از برنامه Shizuku بدهید (برنامه‌های مجاز).</string>
+              <string name="err_shizuku">Shizuku آماده نیست. برای بررسی، تنظیمات را باز کنید.</string>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/values-es/strings.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="subtitle">Controla el arranque del sistema dinámico (DSU)</string>
+              <string name="stay_title">Permanecer en DSU siempre</string>
+              <string name="stay_desc">Al desactivarlo, el dispositivo vuelve a la ROM original en el próximo arranque</string>
+              <string name="btn_status">Actualizar estado</string>
+              <string name="btn_reboot">Reiniciar</string>
+              <string name="btn_settings">Ajustes</string>
+              <string name="state_on">Activado: el dispositivo arrancará en DSU</string>
+              <string name="state_off">Desactivado: el dispositivo volverá a la ROM original</string>
+              <string name="settings_title">Ajustes</string>
+              <string name="language">Idioma</string>
+              <string name="lang_system">Predeterminado del sistema</string>
+              <string name="method">Ejecutar comandos con</string>
+              <string name="shizuku_ok">Shizuku está listo</string>
+              <string name="shizuku_nopermission">Shizuku se está ejecutando pero falta el permiso</string>
+              <string name="shizuku_notrunning">Shizuku no se está ejecutando o no está instalado</string>
+              <string name="shizuku_grant">Conceder permiso a Shizuku</string>
+              <string name="shizuku_denied_hint">Permiso denegado. Concédelo desde la app Shizuku (apps autorizadas).</string>
+              <string name="err_shizuku">Shizuku no está listo. Abre Ajustes para comprobarlo.</string>
+          </resources>
+          EOF
+
+          # ---------------- Layouts ----------------
+          cat > app/src/main/res/layout/activity_main.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+              xmlns:app="http://schemas.android.com/apk/res-auto"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:fillViewport="true"
+              android:background="?attr/colorSurface">
+
+              <LinearLayout
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:orientation="vertical"
+                  android:paddingStart="24dp"
+                  android:paddingEnd="24dp"
+                  android:paddingTop="72dp"
+                  android:paddingBottom="32dp">
+
+                  <TextView
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:text="DSU Lock"
+                      android:textAppearance="?attr/textAppearanceDisplayMedium"
+                      android:textColor="?attr/colorOnSurface"/>
+
+                  <TextView
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:layout_marginTop="4dp"
+                      android:layout_marginBottom="32dp"
+                      android:text="@string/subtitle"
+                      android:textAppearance="?attr/textAppearanceBodyLarge"
+                      android:textColor="?attr/colorOnSurfaceVariant"/>
+
+                  <com.google.android.material.card.MaterialCardView
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      app:cardCornerRadius="28dp"
+                      app:cardElevation="0dp"
+                      app:cardBackgroundColor="?attr/colorPrimaryContainer">
+
+                      <LinearLayout
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:orientation="horizontal"
+                          android:gravity="center_vertical"
+                          android:padding="24dp">
+
+                          <LinearLayout
+                              android:layout_width="0dp"
+                              android:layout_height="wrap_content"
+                              android:layout_weight="1"
+                              android:orientation="vertical"
+                              android:paddingEnd="16dp">
+
+                              <TextView
+                                  android:layout_width="wrap_content"
+                                  android:layout_height="wrap_content"
+                                  android:text="@string/stay_title"
+                                  android:textAppearance="?attr/textAppearanceTitleLarge"
+                                  android:textColor="?attr/colorOnPrimaryContainer"/>
+
+                              <TextView
+                                  android:layout_width="wrap_content"
+                                  android:layout_height="wrap_content"
+                                  android:layout_marginTop="4dp"
+                                  android:text="@string/stay_desc"
+                                  android:textAppearance="?attr/textAppearanceBodyMedium"
+                                  android:textColor="?attr/colorOnPrimaryContainer"/>
+                          </LinearLayout>
+
+                          <com.google.android.material.materialswitch.MaterialSwitch
+                              android:id="@+id/sw"
+                              android:layout_width="wrap_content"
+                              android:layout_height="wrap_content"/>
+                      </LinearLayout>
+                  </com.google.android.material.card.MaterialCardView>
+
+                  <com.google.android.material.card.MaterialCardView
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:layout_marginTop="16dp"
+                      app:cardCornerRadius="28dp"
+                      app:cardElevation="0dp"
+                      app:cardBackgroundColor="?attr/colorSurfaceContainerHigh">
+
+                      <LinearLayout
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:orientation="vertical"
+                          android:padding="24dp">
+
+                          <TextView
+                              android:id="@+id/summary"
+                              android:layout_width="match_parent"
+                              android:layout_height="wrap_content"
+                              android:text="..."
+                              android:textAppearance="?attr/textAppearanceTitleMedium"
+                              android:textColor="?attr/colorOnSurface"/>
+
+                          <TextView
+                              android:id="@+id/raw"
+                              android:layout_width="match_parent"
+                              android:layout_height="wrap_content"
+                              android:layout_marginTop="12dp"
+                              android:fontFamily="monospace"
+                              android:textSize="12sp"
+                              android:textColor="?attr/colorOnSurfaceVariant"/>
+                      </LinearLayout>
+                  </com.google.android.material.card.MaterialCardView>
+
+                  <com.google.android.material.button.MaterialButton
+                      android:id="@+id/btnStatus"
+                      style="@style/Widget.Material3.Button.TonalButton"
+                      android:layout_width="match_parent"
+                      android:layout_height="64dp"
+                      android:layout_marginTop="24dp"
+                      android:text="@string/btn_status"
+                      app:cornerRadius="32dp"/>
+
+                  <com.google.android.material.button.MaterialButton
+                      android:id="@+id/btnReboot"
+                      style="@style/Widget.Material3.Button"
+                      android:layout_width="match_parent"
+                      android:layout_height="64dp"
+                      android:layout_marginTop="12dp"
+                      android:text="@string/btn_reboot"
+                      app:cornerRadius="32dp"/>
+
+                  <com.google.android.material.button.MaterialButton
+                      android:id="@+id/btnSettings"
+                      style="@style/Widget.Material3.Button.OutlinedButton"
+                      android:layout_width="match_parent"
+                      android:layout_height="64dp"
+                      android:layout_marginTop="12dp"
+                      android:text="@string/btn_settings"
+                      app:cornerRadius="32dp"/>
+              </LinearLayout>
+          </ScrollView>
+          EOF
+
+          cat > app/src/main/res/layout/activity_settings.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+              xmlns:app="http://schemas.android.com/apk/res-auto"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:fillViewport="true"
+              android:background="?attr/colorSurface">
+
+              <LinearLayout
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:orientation="vertical"
+                  android:paddingStart="24dp"
+                  android:paddingEnd="24dp"
+                  android:paddingTop="72dp"
+                  android:paddingBottom="32dp">
+
+                  <TextView
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:layout_marginBottom="32dp"
+                      android:text="@string/settings_title"
+                      android:textAppearance="?attr/textAppearanceDisplayMedium"
+                      android:textColor="?attr/colorOnSurface"/>
+
+                  <com.google.android.material.card.MaterialCardView
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      app:cardCornerRadius="28dp"
+                      app:cardElevation="0dp"
+                      app:cardBackgroundColor="?attr/colorSurfaceContainerHigh">
+
+                      <LinearLayout
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:orientation="vertical"
+                          android:padding="24dp">
+
+                          <TextView
+                              android:layout_width="match_parent"
+                              android:layout_height="wrap_content"
+                              android:text="@string/language"
+                              android:textAppearance="?attr/textAppearanceTitleMedium"
+                              android:textColor="?attr/colorOnSurface"/>
+
+                          <com.google.android.material.button.MaterialButton
+                              android:id="@+id/btnLang"
+                              style="@style/Widget.Material3.Button.TonalButton"
+                              android:layout_width="match_parent"
+                              android:layout_height="56dp"
+                              android:layout_marginTop="12dp"
+                              app:cornerRadius="28dp"/>
+                      </LinearLayout>
+                  </com.google.android.material.card.MaterialCardView>
+
+                  <com.google.android.material.card.MaterialCardView
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:layout_marginTop="16dp"
+                      app:cardCornerRadius="28dp"
+                      app:cardElevation="0dp"
+                      app:cardBackgroundColor="?attr/colorSurfaceContainerHigh">
+
+                      <LinearLayout
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:orientation="vertical"
+                          android:padding="24dp">
+
+                          <TextView
+                              android:layout_width="match_parent"
+                              android:layout_height="wrap_content"
+                              android:text="@string/method"
+                              android:textAppearance="?attr/textAppearanceTitleMedium"
+                              android:textColor="?attr/colorOnSurface"/>
+
+                          <RadioGroup
+                              android:id="@+id/rg"
+                              android:layout_width="match_parent"
+                              android:layout_height="wrap_content"
+                              android:layout_marginTop="8dp">
+
+                              <com.google.android.material.radiobutton.MaterialRadioButton
+                                  android:id="@+id/rbRoot"
+                                  android:layout_width="match_parent"
+                                  android:layout_height="wrap_content"
+                                  android:text="@string/method_root"/>
+
+                              <com.google.android.material.radiobutton.MaterialRadioButton
+                                  android:id="@+id/rbShizuku"
+                                  android:layout_width="match_parent"
+                                  android:layout_height="wrap_content"
+                                  android:text="@string/method_shizuku"/>
+                          </RadioGroup>
+
+                          <TextView
+                              android:id="@+id/shStatus"
+                              android:layout_width="match_parent"
+                              android:layout_height="wrap_content"
+                              android:layout_marginTop="12dp"
+                              android:textAppearance="?attr/textAppearanceBodyMedium"
+                              android:textColor="?attr/colorOnSurfaceVariant"/>
+
+                          <com.google.android.material.button.MaterialButton
+                              android:id="@+id/btnGrant"
+                              style="@style/Widget.Material3.Button.TonalButton"
+                              android:layout_width="match_parent"
+                              android:layout_height="56dp"
+                              android:layout_marginTop="12dp"
+                              android:text="@string/shizuku_grant"
+                              android:visibility="gone"
+                              app:cornerRadius="28dp"/>
+                      </LinearLayout>
+                  </com.google.android.material.card.MaterialCardView>
+              </LinearLayout>
+          </ScrollView>
+          EOF
+
+          # ---------------- Java ----------------
+          cat > app/src/main/java/com/dsulock/Shell.java <<'EOF'
+          package com.dsulock;
+
+          import android.content.Context;
+          import android.content.pm.PackageManager;
+          import java.io.BufferedReader;
+          import java.io.InputStreamReader;
+          import java.lang.reflect.Method;
+          import rikka.shizuku.Shizuku;
+
+          public class Shell {
+              public static boolean useShizuku(Context c) {
+                  return "shizuku".equals(c.getSharedPreferences("p", Context.MODE_PRIVATE).getString("method", "root"));
+              }
+
+              public static boolean shizukuReady() {
+                  try {
+                      return Shizuku.pingBinder() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED;
+                  } catch (Throwable t) {
+                      return false;
+                  }
+              }
+
+              public static String run(Context c, String cmd) {
+                  try {
+                      Process p;
+                      if (useShizuku(c)) {
+                          if (!shizukuReady()) return c.getString(R.string.err_shizuku);
+                          Method m = Shizuku.class.getDeclaredMethod("newProcess", String[].class, String[].class, String.class);
+                          m.setAccessible(true);
+                          p = (Process) m.invoke(null, new Object[]{new String[]{"sh", "-c", cmd + " 2>&1"}, null, null});
+                      } else {
+                          p = Runtime.getRuntime().exec(new String[]{"su", "-c", cmd + " 2>&1"});
+                      }
+                      BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()));
+                      StringBuilder sb = new StringBuilder();
+                      String l;
+                      while ((l = r.readLine()) != null) sb.append(l).append('\n');
+                      p.waitFor();
+                      return sb.toString().trim();
+                  } catch (Throwable e) {
+                      return "Error: " + e;
+                  }
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/dsulock/MainActivity.java <<'EOF'
+          package com.dsulock;
+
+          import android.content.Intent;
+          import android.os.Bundle;
+          import android.widget.TextView;
+          import androidx.appcompat.app.AppCompatActivity;
+          import com.google.android.material.button.MaterialButton;
+          import com.google.android.material.materialswitch.MaterialSwitch;
+
+          public class MainActivity extends AppCompatActivity {
+              private MaterialSwitch sw;
+              private TextView summary, raw;
+              private boolean updating = false;
+
+              private void async(final String cmd) {
+                  new Thread(() -> {
+                      if (cmd != null) Shell.run(this, cmd);
+                      final String st = Shell.run(this, "gsi_tool status");
+                      runOnUiThread(() -> render(st));
+                  }).start();
+              }
+
+              private void render(String st) {
+                  String[] ls = st.split("\n");
+                  boolean enabled = ls.length > 1 && ls[1].trim().equals("enabled");
+                  updating = true;
+                  sw.setChecked(enabled);
+                  updating = false;
+                  summary.setText(enabled ? R.string.state_on : R.string.state_off);
+                  raw.setText(st);
+              }
+
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  setContentView(R.layout.activity_main);
+                  sw = findViewById(R.id.sw);
+                  summary = findViewById(R.id.summary);
+                  raw = findViewById(R.id.raw);
+                  MaterialButton st = findViewById(R.id.btnStatus);
+                  MaterialButton rb = findViewById(R.id.btnReboot);
+                  MaterialButton se = findViewById(R.id.btnSettings);
+
+                  sw.setOnCheckedChangeListener((v, on) -> {
+                      if (updating) return;
+                      // enable = persistent (no -s); disable = next boot returns to the host ROM
+                      async(on ? "gsi_tool enable" : "gsi_tool disable");
+                  });
+                  st.setOnClickListener(v -> async(null));
+                  rb.setOnClickListener(v -> new Thread(() -> Shell.run(this, "svc power reboot || reboot")).start());
+                  se.setOnClickListener(v -> startActivity(new Intent(this, SettingsActivity.class)));
+              }
+
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  async(null);
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/dsulock/SettingsActivity.java <<'EOF'
+          package com.dsulock;
+
+          import android.content.SharedPreferences;
+          import android.os.Bundle;
+          import android.view.View;
+          import android.widget.RadioGroup;
+          import android.widget.TextView;
+          import android.widget.Toast;
+          import androidx.appcompat.app.AppCompatActivity;
+          import androidx.appcompat.app.AppCompatDelegate;
+          import androidx.core.os.LocaleListCompat;
+          import com.google.android.material.button.MaterialButton;
+          import com.google.android.material.dialog.MaterialAlertDialogBuilder;
+          import rikka.shizuku.Shizuku;
+
+          public class SettingsActivity extends AppCompatActivity {
+              private static final String[] TAGS = {"", "ar", "en", "fr", "tr", "fa", "es"};
+              private static final String[] NAMES = {null, "العربية", "English", "Français", "Türkçe", "فارسی", "Español"};
+
+              private MaterialButton btnLang, btnGrant;
+              private TextView shStatus;
+              private RadioGroup rg;
+
+              private final Shizuku.OnRequestPermissionResultListener permL =
+                  (code, res) -> runOnUiThread(this::refresh);
+
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  setContentView(R.layout.activity_settings);
+                  btnLang = findViewById(R.id.btnLang);
+                  btnGrant = findViewById(R.id.btnGrant);
+                  shStatus = findViewById(R.id.shStatus);
+                  rg = findViewById(R.id.rg);
+
+                  final SharedPreferences sp = getSharedPreferences("p", MODE_PRIVATE);
+                  rg.check("shizuku".equals(sp.getString("method", "root")) ? R.id.rbShizuku : R.id.rbRoot);
+                  rg.setOnCheckedChangeListener((g, id) -> {
+                      sp.edit().putString("method", id == R.id.rbShizuku ? "shizuku" : "root").apply();
+                      refresh();
+                  });
+
+                  btnLang.setOnClickListener(v -> pickLang());
+                  btnGrant.setOnClickListener(v -> grant());
+
+                  try { Shizuku.addRequestPermissionResultListener(permL); } catch (Throwable ignored) {}
+              }
+
+              @Override
+              protected void onDestroy() {
+                  try { Shizuku.removeRequestPermissionResultListener(permL); } catch (Throwable ignored) {}
+                  super.onDestroy();
+              }
+
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  refresh();
+              }
+
+              private int currentLangIndex() {
+                  LocaleListCompat l = AppCompatDelegate.getApplicationLocales();
+                  if (l.isEmpty() || l.get(0) == null) return 0;
+                  String lang = l.get(0).getLanguage();
+                  for (int i = 1; i < TAGS.length; i++) if (TAGS[i].equals(lang)) return i;
+                  return 0;
+              }
+
+              private String langName(int i) {
+                  return NAMES[i] == null ? getString(R.string.lang_system) : NAMES[i];
+              }
+
+              private void pickLang() {
+                  String[] n = new String[NAMES.length];
+                  for (int i = 0; i < n.length; i++) n[i] = langName(i);
+                  new MaterialAlertDialogBuilder(this)
+                      .setTitle(R.string.language)
+                      .setSingleChoiceItems(n, currentLangIndex(), (d, w) -> {
+                          d.dismiss();
+                          AppCompatDelegate.setApplicationLocales(w == 0
+                              ? LocaleListCompat.getEmptyLocaleList()
+                              : LocaleListCompat.forLanguageTags(TAGS[w]));
+                      })
+                      .show();
+              }
+
+              private void grant() {
+                  try {
+                      if (!Shizuku.pingBinder()) { refresh(); return; }
+                      if (Shizuku.shouldShowRequestPermissionRationale()) {
+                          Toast.makeText(this, R.string.shizuku_denied_hint, Toast.LENGTH_LONG).show();
+                      } else {
+                          Shizuku.requestPermission(1);
+                      }
+                  } catch (Throwable ignored) {}
+              }
+
+              private void refresh() {
+                  btnLang.setText(langName(currentLangIndex()));
+                  boolean sz = rg.getCheckedRadioButtonId() == R.id.rbShizuku;
+                  shStatus.setVisibility(sz ? View.VISIBLE : View.GONE);
+                  btnGrant.setVisibility(View.GONE);
+                  if (!sz) return;
+                  boolean running = false;
+                  try { running = Shizuku.pingBinder(); } catch (Throwable ignored) {}
+                  if (!running) {
+                      shStatus.setText(R.string.shizuku_notrunning);
+                  } else if (Shell.shizukuReady()) {
+                      shStatus.setText(R.string.shizuku_ok);
+                  } else {
+                      shStatus.setText(R.string.shizuku_nopermission);
+                      btnGrant.setVisibility(View.VISIBLE);
+                  }
+              }
+          }
+          EOF
+
+      - name: Build
+        run: gradle assembleDebug --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DsuLock-v3-apk
+          path: app/build/outputs/apk/debug/*.apk
