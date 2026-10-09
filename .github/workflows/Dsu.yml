@@ -1,0 +1,155 @@
+name: Build DSU Lock APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+
+      - name: Accept Android SDK licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+
+      - name: Generate project
+        run: |
+          mkdir -p app/src/main/java/com/dsulock
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "DsuLock"
+          include ':app'
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins { id 'com.android.application' version '8.5.2' apply false }
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins { id 'com.android.application' }
+          android {
+              namespace 'com.dsulock'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'com.dsulock'
+                  minSdk 29
+                  targetSdk 29
+                  versionCode 1
+                  versionName '1.0'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application android:label="DSU Lock">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/dsulock/MainActivity.java <<'EOF'
+          package com.dsulock;
+
+          import android.app.Activity;
+          import android.content.SharedPreferences;
+          import android.os.Bundle;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.Switch;
+          import android.widget.TextView;
+          import java.io.BufferedReader;
+          import java.io.InputStreamReader;
+
+          public class MainActivity extends Activity {
+              private TextView out;
+
+              private String sh(String cmd) {
+                  try {
+                      Process p = Runtime.getRuntime().exec(new String[]{"su", "-c", cmd + " 2>&1"});
+                      BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()));
+                      StringBuilder sb = new StringBuilder();
+                      String l;
+                      while ((l = r.readLine()) != null) sb.append(l).append('\n');
+                      p.waitFor();
+                      return sb.toString().trim();
+                  } catch (Exception e) {
+                      return "Error (root required): " + e.getMessage();
+                  }
+              }
+
+              private void show(String s) { out.setText(s.isEmpty() ? "OK" : s); }
+
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  final SharedPreferences sp = getSharedPreferences("p", MODE_PRIVATE);
+
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(40, 60, 40, 40);
+
+                  Switch sw = new Switch(this);
+                  sw.setText("البقاء في DSU دائماً / Stay in DSU forever");
+                  sw.setChecked(sp.getBoolean("stay", false));
+                  root.addView(sw);
+
+                  Button st = new Button(this);
+                  st.setText("الحالة / Status");
+                  root.addView(st);
+
+                  Button rb = new Button(this);
+                  rb.setText("إعادة التشغيل / Reboot");
+                  root.addView(rb);
+
+                  out = new TextView(this);
+                  out.setPadding(0, 30, 0, 0);
+                  ScrollView sv = new ScrollView(this);
+                  sv.addView(out);
+                  root.addView(sv);
+                  setContentView(root);
+
+                  sw.setOnCheckedChangeListener((v, on) -> {
+                      sp.edit().putBoolean("stay", on).apply();
+                      // enable = persistent (no -s), disable = next boot returns to the host ROM
+                      show(sh(on ? "gsi_tool enable" : "gsi_tool disable"));
+                  });
+                  st.setOnClickListener(v -> show(sh("gsi_tool status")));
+                  rb.setOnClickListener(v -> sh("svc power reboot || reboot"));
+              }
+          }
+          EOF
+
+      - name: Build
+        run: gradle assembleDebug --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DsuLock-apk
+          path: app/build/outputs/apk/debug/*.apk
