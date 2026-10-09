@@ -1,0 +1,160 @@
+name: Kernel Tree Generator (from boot.img)
+
+on:
+  workflow_dispatch:
+    inputs:
+      boot_url:
+        description: "رابط boot.img الرسمي (مباشر)"
+        required: true
+      device_name:
+        description: "اسم الجهاز (مثال: oppo_a15)"
+        default: "oppo_a15"
+      push_repo:
+        description: "رفع الشجرة كمستودع جديد؟"
+        type: boolean
+        default: true
+      private_repo:
+        description: "مستودع خاص؟"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    runs-on: ubuntu-22.04
+    env:
+      BOOT_URL: ${{ inputs.boot_url }}
+      DEVICE: ${{ inputs.device_name }}
+    steps:
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq device-tree-compiler python3 binutils \
+            xz-utils lz4 zstd bzip2 lzop gzip wget curl unzip
+
+      - name: Download boot.img and AOSP unpack tool
+        run: |
+          wget -q -O boot.img "$BOOT_URL"
+          curl -sL "https://android.googlesource.com/platform/system/tools/mkbootimg/+/refs/heads/main/unpack_bootimg.py?format=TEXT" | base64 -d > unpack_bootimg.py
+          curl -sL "https://raw.githubusercontent.com/torvalds/linux/master/scripts/extract-ikconfig" -o extract-ikconfig
+          chmod +x extract-ikconfig
+          ls -lh boot.img unpack_bootimg.py
+
+      - name: Unpack boot.img
+        run: |
+          mkdir -p tree/$DEVICE/prebuilt tree/$DEVICE/dtb tree/$DEVICE/dts tree/$DEVICE/config tree/$DEVICE/bootimg
+          python3 unpack_bootimg.py --boot_img boot.img --out unpacked > tree/$DEVICE/bootimg/info.txt
+          python3 unpack_bootimg.py --boot_img boot.img --out /tmp/u2 --format=mkbootimg > tree/$DEVICE/bootimg/mkbootimg_args.txt
+          cat tree/$DEVICE/bootimg/info.txt
+          ls -la unpacked
+
+      - name: Extract kernel, DTBs, DTS, config
+        run: |
+          cat > extract.py <<'EOF'
+          import os, struct, sys, zlib
+
+          dev = sys.argv[1]
+          base = f"tree/{dev}"
+          kpath = "unpacked/kernel"
+          data = open(kpath, "rb").read()
+          # MediaTek header (512 bytes) إن وجد
+          if data[:4] == bytes.fromhex("88168858"):
+              data = data[512:]
+          open(f"{base}/prebuilt/kernel", "wb").write(data)
+
+          blobs = [data]
+          try:
+              d = zlib.decompressobj(31)
+              img = d.decompress(data)
+              open("kernel_decompressed", "wb").write(img)
+              blobs = [img, d.unused_data]
+          except Exception:
+              open("kernel_decompressed", "wb").write(data)
+
+          def split_dtbs(blob):
+              out, pos = [], 0
+              while True:
+                  o = blob.find(b"\xd0\x0d\xfe\xed", pos)
+                  if o < 0:
+                      break
+                  size = struct.unpack(">I", blob[o + 4:o + 8])[0]
+                  ver = struct.unpack(">I", blob[o + 20:o + 24])[0]
+                  if 256 < size < 8 * 1024 * 1024 and ver in (16, 17) and o + size <= len(blob):
+                      out.append(blob[o:o + size])
+                      pos = o + size
+                  else:
+                      pos = o + 4
+              return out
+
+          dtbs = []
+          if os.path.exists("unpacked/dtb"):
+              dtbs = split_dtbs(open("unpacked/dtb", "rb").read())
+              src = "header dtb"
+          if not dtbs:
+              for b in blobs:
+                  dtbs += split_dtbs(b)
+              src = "appended to kernel"
+          print(f"found {len(dtbs)} dtb(s) from: {src if dtbs else 'none'}")
+          for i, b in enumerate(dtbs):
+              open(f"{base}/dtb/{i:02d}.dtb", "wb").write(b)
+          EOF
+          python3 extract.py "$DEVICE"
+
+          for f in tree/$DEVICE/dtb/*.dtb; do
+            [ -f "$f" ] && dtc -I dtb -O dts -o "tree/$DEVICE/dts/$(basename "${f%.dtb}").dts" "$f" 2>/dev/null || true
+          done
+
+          # defconfig من IKCONFIG إن كان مفعّلًا
+          ./extract-ikconfig tree/$DEVICE/prebuilt/kernel > tree/$DEVICE/config/extracted.config 2>/dev/null \
+            || ./extract-ikconfig kernel_decompressed > tree/$DEVICE/config/extracted.config 2>/dev/null \
+            || echo "# IKCONFIG غير متوفر في هذا الكيرنل" > tree/$DEVICE/config/extracted.config
+
+          strings -n 8 kernel_decompressed | grep -m1 "Linux version" > tree/$DEVICE/prebuilt/kernel_version.txt || true
+
+          cat > tree/$DEVICE/README.md <<EOF2
+          # Kernel tree: $DEVICE
+
+          مولَّد آليًا من boot.img (ليس سورس كيرنل أصلي).
+
+          - prebuilt/kernel : الكيرنل الجاهز
+          - dtb/ , dts/     : ملفات DTB وملفات DTS المفكوكة منها (للمقارنة مع سورس ريالمي)
+          - config/extracted.config : إعدادات الكيرنل إن كان IKCONFIG مفعّلًا
+          - bootimg/        : معاملات boot.img (offsets, cmdline, header version)
+          EOF2
+          find tree -type f | sort
+
+      - name: Zip tree
+        run: |
+          mkdir -p out
+          (cd tree && zip -qr -9 ../out/kernel_tree_$DEVICE.zip .)
+          ls -lh out
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-tree
+          path: out/*
+
+      - name: Push as new GitHub repo
+        if: ${{ inputs.push_repo }}
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          PRIVATE: ${{ inputs.private_repo }}
+        run: |
+          set -e
+          [ -n "$GH_TOKEN" ] || { echo "أضف السر GH_PAT (صلاحية repo)"; exit 1; }
+          OWNER=$(gh api user --jq .login)
+          REPO="kernel_tree_${DEVICE}"
+          VIS=--private; [ "$PRIVATE" = "true" ] || VIS=--public
+          gh repo create "$OWNER/$REPO" $VIS || true
+          cd tree/$DEVICE
+          git init -q -b main
+          git config user.name "kernel-bot"
+          git config user.email "kernel-bot@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Kernel tree generated from boot.img"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/$OWNER/$REPO.git"
+          git push -u origin main --force
+          echo "https://github.com/$OWNER/$REPO"
