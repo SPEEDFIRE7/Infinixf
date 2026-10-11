@@ -1,0 +1,144 @@
+name: Build Miku UI
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Manifest branch"
+        required: true
+        default: "Cinderella"
+      lunch_target:
+        description: "Lunch target (GSI: miku_gsi_phone_arm64 | Device: miku_<codename>)"
+        required: true
+        default: "miku_gsi_phone_arm64"
+      release:
+        description: "Release (check the Miku-UI wiki for the right one)"
+        required: true
+        default: "bp1a"
+      build_type:
+        description: "Build type"
+        required: true
+        default: "userdebug"
+        type: choice
+        options:
+          - userdebug
+          - user
+          - eng
+      make_target:
+        description: "Make target (GSI: systemimage | Device: diva)"
+        required: true
+        default: "systemimage"
+      upload_release:
+        description: "Upload result to GitHub Releases"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  TZ: UTC
+  USE_CCACHE: 1
+  CCACHE_EXEC: /usr/bin/ccache
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_MAXSIZE: 20G
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@v10
+        with:
+          root-reserve-mb: 4096
+          swap-size-mb: 8192
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          remove-codeql: "true"
+          remove-docker-images: "true"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git-core gnupg flex bison build-essential zip curl zlib1g-dev \
+            libc6-dev-i386 libncurses6 x11proto-core-dev libx11-dev \
+            lib32z1-dev libgl1-mesa-dev libxml2-utils xsltproc unzip fontconfig \
+            python3 python-is-python3 ccache git-lfs bc rsync lz4 zstd \
+            openjdk-17-jdk libssl-dev libelf-dev
+          git lfs install
+
+      - name: Install repo tool
+        run: |
+          mkdir -p ~/bin
+          curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Git identity
+        run: |
+          git config --global user.name  "github-actions"
+          git config --global user.email "actions@github.com"
+          git config --global color.ui false
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-${{ inputs.lunch_target }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ inputs.lunch_target }}-
+
+      - name: Sync source code
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/miku" && cd "$GITHUB_WORKSPACE/miku"
+          repo init -u https://github.com/Miku-UI/manifesto \
+            -b "${{ inputs.branch }}" --git-lfs --depth=1
+          repo sync -c -j"$(nproc)" --force-sync --no-clone-bundle --no-tags \
+            --optimized-fetch --prune
+
+      - name: Build
+        run: |
+          cd "$GITHUB_WORKSPACE/miku"
+          ccache -M "$CCACHE_MAXSIZE"
+          set +u
+          source build/envsetup.sh
+          lunch "${{ inputs.lunch_target }}-${{ inputs.release }}-${{ inputs.build_type }}"
+          make -j"$(nproc)" ${{ inputs.make_target }}
+
+      - name: Collect output
+        if: success()
+        run: |
+          cd "$GITHUB_WORKSPACE/miku"
+          mkdir -p "$GITHUB_WORKSPACE/out_final"
+          find out/target/product -maxdepth 2 \
+            \( -name "system.img" -o -name "*.zip" -o -name "boot.img" \
+               -o -name "vendor_boot.img" -o -name "super.img" \) \
+            -exec cp -v {} "$GITHUB_WORKSPACE/out_final/" \;
+          cd "$GITHUB_WORKSPACE/out_final"
+          if [ -f system.img ]; then
+            zstd -T0 -19 system.img -o system.img.zst
+            rm -f system.img
+          fi
+          ls -lh
+
+      - name: Upload artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: miku-ui-${{ inputs.lunch_target }}
+          path: out_final/*
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload to Releases
+        if: success() && inputs.upload_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: miku-${{ inputs.lunch_target }}-${{ github.run_number }}
+          name: Miku UI ${{ inputs.lunch_target }} #${{ github.run_number }}
+          files: out_final/*
