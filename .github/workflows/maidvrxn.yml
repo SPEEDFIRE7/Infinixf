@@ -7,7 +7,7 @@ on:
 
 jobs:
   check-disks:
-    runs-on: ubuntu-latest  # غيّرها إلى [self-hosted] إذا كان لديك سيرفر خاص
+    runs-on: namespace-profile-rdrd  # غيّرها إلى [self-hosted] إذا كان لديك سيرفر خاص
 
     steps:
       - name: قائمة الأقراص والأجهزة المتصلة
