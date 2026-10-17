@@ -1,0 +1,38 @@
+name: NeedROM Download
+
+on:
+  workflow_dispatch:
+    inputs:
+      rom_url:
+        description: "رابط صفحة/تحميل الروم على needrom"
+        required: true
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Login + download
+        env:
+          NR_USER: ${{ secrets.NEEDROM_USER }}
+          NR_PASS: ${{ secrets.NEEDROM_PASS }}
+          ROM_URL: ${{ inputs.rom_url }}
+        run: |
+          UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36"
+          # 1) تسجيل الدخول وحفظ الكوكيز
+          curl -sSL -A "$UA" -c cj.txt -b cj.txt \
+            --data-urlencode "username=$NR_USER" \
+            --data-urlencode "password=$NR_PASS" \
+            "https://www.needrom.com/login" -o login.html
+          # 2) التحميل بالجلسة المحفوظة
+          curl -L -A "$UA" -b cj.txt -e "https://www.needrom.com/" \
+            -OJ "$ROM_URL"
+          ls -lh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: |
+            *.zip
+            *.rar
+            *.7z
+            *.tgz
