@@ -1,0 +1,166 @@
+name: T606 Black Screen Fix (hwcomposer patch)
+
+on:
+  workflow_dispatch:
+    inputs:
+      lib64_url:
+        description: "رابط PixelDrain لملف hwcomposer.unisoc.so (64-bit)"
+        required: true
+        type: string
+      lib32_url:
+        description: "رابط PixelDrain لملف hwcomposer.unisoc.so (32-bit)"
+        required: true
+        type: string
+      vendor_img_url:
+        description: "(اختياري) رابط PixelDrain لـ vendor.img (EROFS أو ext4) لتصحيحه مباشرة"
+        required: false
+        default: ""
+        type: string
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xxd curl python3-pip android-sdk-libsparse-utils e2fsprogs
+          pip3 install --break-system-packages pyelftools
+
+      - name: Download files from PixelDrain
+        env:
+          LIB64_URL: ${{ inputs.lib64_url }}
+          LIB32_URL: ${{ inputs.lib32_url }}
+          VENDOR_URL: ${{ inputs.vendor_img_url }}
+        run: |
+          set -e
+          mkdir -p work/64 work/32 out
+          dl() {
+            local url="$1" dest="$2"
+            local id
+            id=$(echo "$url" | sed -E 's#.*/u/([A-Za-z0-9_-]+).*#\1#')
+            if [ -z "$id" ] || [ "$id" = "$url" ]; then
+              echo "::error::Invalid PixelDrain link: $url"; exit 1
+            fi
+            curl -fL --retry 3 -o "$dest" "https://pixeldrain.com/api/file/${id}?download"
+          }
+          dl "$LIB64_URL" work/64/hwcomposer.unisoc.so
+          dl "$LIB32_URL" work/32/hwcomposer.unisoc.so
+          if [ -n "$VENDOR_URL" ]; then dl "$VENDOR_URL" work/vendor.img; fi
+          cp work/64/hwcomposer.unisoc.so out/hwcomposer.unisoc.64.ORIGINAL.so
+          cp work/32/hwcomposer.unisoc.so out/hwcomposer.unisoc.32.ORIGINAL.so
+          file work/64/hwcomposer.unisoc.so work/32/hwcomposer.unisoc.so || true
+
+      - name: Patch set_color_transform
+        run: |
+          cat > patch.py << 'EOF'
+          import sys
+          from elftools.elf.elffile import ELFFile
+
+          path, arch = sys.argv[1], sys.argv[2]
+          STUBS = {
+              "arm64": bytes([0x00, 0x00, 0x80, 0x52, 0xC0, 0x03, 0x5F, 0xD6]),  # MOV W0,#0; RET
+              "arm":   bytes([0x00, 0x00, 0xA0, 0xE3, 0x1E, 0xFF, 0x2F, 0xE1]),  # MOV R0,#0; BX LR
+              "thumb": bytes([0x00, 0x20, 0x70, 0x47]),                          # MOVS R0,#0; BX LR
+          }
+
+          with open(path, "rb") as f:
+              elf = ELFFile(f)
+              dynsym = elf.get_section_by_name(".dynsym")
+              if dynsym is None:
+                  sys.exit("ERROR: no .dynsym section")
+              cands = []
+              for s in dynsym.iter_symbols():
+                  if "set_color_transform" in s.name and s["st_shndx"] != "SHN_UNDEF" and s["st_value"]:
+                      cands.append((s.name, s["st_value"]))
+              if not cands:
+                  sys.exit("ERROR: set_color_transform not found (library is stripped?) - manual disassembly needed")
+              pref = [c for c in cands if "HWCDisplay" in c[0]]
+              pool = pref or cands
+              if len(pool) != 1:
+                  sys.exit("ERROR: ambiguous symbols: %s" % pool)
+              name, vaddr = pool[0]
+              print("Symbol:", name, hex(vaddr))
+
+              mode = arch
+              if arch == "arm" and vaddr & 1:
+                  mode = "thumb"
+                  vaddr &= ~1
+                  print("Thumb function detected, using Thumb stub")
+
+              off = None
+              for seg in elf.iter_segments():
+                  if seg["p_type"] == "PT_LOAD" and seg["p_vaddr"] <= vaddr < seg["p_vaddr"] + seg["p_filesz"]:
+                      off = vaddr - seg["p_vaddr"] + seg["p_offset"]
+                      break
+              if off is None:
+                  sys.exit("ERROR: could not map vaddr to file offset")
+              print("File offset:", hex(off))
+
+          stub = STUBS[mode]
+          with open(path, "r+b") as f:
+              f.seek(off)
+              f.write(stub)
+          with open(path, "rb") as f:
+              f.seek(off)
+              assert f.read(len(stub)) == stub, "verification failed"
+          print("Patched OK:", stub.hex(), "at", hex(off))
+          open(path + ".offset", "w").write(hex(off))
+          EOF
+          python3 patch.py work/64/hwcomposer.unisoc.so arm64
+          python3 patch.py work/32/hwcomposer.unisoc.so arm
+          xxd -s "$(cat work/64/hwcomposer.unisoc.so.offset)" -l 8 work/64/hwcomposer.unisoc.so
+          xxd -s "$(cat work/32/hwcomposer.unisoc.so.offset)" -l 8 work/32/hwcomposer.unisoc.so
+          mkdir -p out/lib64/hw out/lib/hw
+          cp work/64/hwcomposer.unisoc.so out/lib64/hw/hwcomposer.unisoc.so
+          cp work/32/hwcomposer.unisoc.so out/lib/hw/hwcomposer.unisoc.so
+
+      - name: Patch vendor.img in place (optional, EROFS or ext4)
+        if: ${{ inputs.vendor_img_url != '' }}
+        run: |
+          set -e
+          cd work
+          if file vendor.img | grep -qi "sparse"; then
+            simg2img vendor.img vendor.raw.img && mv vendor.raw.img vendor.img
+          fi
+          file vendor.img
+          cd ..
+          cat > patch_img.py << 'EOF'
+          import mmap, sys
+
+          IMG = "work/vendor.img"
+          JOBS = [
+              ("out/hwcomposer.unisoc.64.ORIGINAL.so", "work/64/hwcomposer.unisoc.so"),
+              ("out/hwcomposer.unisoc.32.ORIGINAL.so", "work/32/hwcomposer.unisoc.so"),
+          ]
+
+          with open(IMG, "r+b") as f:
+              mm = mmap.mmap(f.fileno(), 0)
+              for orig_path, new_path in JOBS:
+                  orig = open(orig_path, "rb").read()
+                  new = open(new_path, "rb").read()
+                  if len(orig) != len(new):
+                      sys.exit("ERROR: size mismatch for " + new_path)
+                  pos = mm.find(orig)
+                  if pos < 0:
+                      sys.exit("ERROR: original " + orig_path + " not found inside vendor.img "
+                               "(image is compressed, or the .so is not from this vendor.img). "
+                               "Use the patched .so files from the artifact instead.")
+                  count = 0
+                  while pos >= 0:
+                      mm[pos:pos + len(new)] = new
+                      count += 1
+                      print("Patched", new_path, "at image offset", hex(pos))
+                      pos = mm.find(orig, pos + len(new))
+                  print("occurrences patched:", count)
+              mm.flush()
+              mm.close()
+          EOF
+          python3 patch_img.py
+          cp work/vendor.img out/vendor.patched.img
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: t606-hwc-patched
+          path: out/
